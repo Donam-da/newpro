@@ -1,18 +1,12 @@
 import os
 import threading
-import time
+import cloudscraper
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from urllib.parse import urlparse
 
-# --- IMPORT SELENIUM TRÌNH DUYỆT ẢO DI ĐỘNG ---
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-
-# --- PHẦN 1: LOGIC KIỂM TRA CHUYỂN HƯỚNG CÓ CHẠY JAVASCRIPT ---
+# --- PHẦN 1: LOGIC TRACE URL DÙNG CLOUDSCRAPER LÁCH CƠ CHẾ CHẶN BOT ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -20,7 +14,7 @@ def is_valid_url(url):
     except:
         return False
 
-def trace_url_with_selenium(input_url):
+def trace_url_with_scraper(input_url):
     if not input_url.strip():
         return "⚠️ Vui lòng nhập một liên kết."
     
@@ -30,68 +24,52 @@ def trace_url_with_selenium(input_url):
     if not is_valid_url(input_url):
         return "❌ Liên kết không hợp lệ."
 
-    # Cấu hình Chrome chạy ẩn ngầm (Headless) không cần giao diện, tối ưu RAM cho Render
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-
-    driver = None
     try:
-        # Tự động tải và cấu hình phiên bản Chrome di động phù hợp với Render
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Khởi tạo scraper giả lập trình duyệt (Vượt qua các hệ thống chặn Javascript/Cloudflare ngầm)
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         
-        # Thiết lập thời gian chờ tải trang tối đa 15 giây
-        driver.set_page_load_timeout(15)
+        # Đi theo chuỗi chuyển hướng (allow_redirects=True)
+        response = scraper.get(input_url, timeout=15, allow_redirects=True)
         
-        # "Ấn enter" mở link
-        driver.get(input_url)
+        # Lấy lịch sử các bước nhảy URL
+        redirect_chain = response.history
         
-        # Đợi 4 giây để Javascript đếm ngược ngầm hoặc chuyển hướng hoạt động xong
-        time.sleep(4)
+        response_text = f"🔍 **Hành trình chuyển hướng thực tế (Lách tường lửa):**\n\n"
+        response_text += f"🏁 **URL gốc:** {input_url}\n"
         
-        # Lấy ra URL cuối cùng sau khi đã chạy xong Javascript
-        final_url = driver.current_url
-        
-        response_text = f"🔍 **Hành trình kiểm tra bằng Trình duyệt ảo:**\n\n"
-        response_text += f"🏁 **URL gốc của bạn:** {input_url}\n\n"
-        
-        if input_url.strip("/") == final_url.strip("/"):
-            response_text += "✨ Trang web đứng yên, không phát hiện lệnh nhảy URL (Redirect) nào khác bằng Javascript.\n"
-            response_text += f"📍 **Điểm dừng hiện tại:** {final_url}"
-        else:
-            response_text += "🚀 **Phát hiện chuyển hướng ngầm bằng Javascript!**\n"
-            response_text += f"🎯 **URL đích thực tế (Điểm đến cuối cùng):**\n`{final_url}`"
+        if not redirect_chain:
+            response_text += "\n✨ Trang web này đứng yên, hoặc hệ thống đích trả về trạng thái tĩnh trực tiếp.\n"
+            response_text += f"📍 **Điểm dừng hiện tại:** {response.url}"
+            return response_text
             
+        response_text += "\n🚀 **Các bước nhảy URL phát hiện được:**\n"
+        for index, step in enumerate(redirect_chain, 1):
+            response_text += f"{index}. {step.url} *(Status: {step.status_code})*\n"
+            
+        response_text += f"\n🎯 **URL cuối cùng (Điểm đến thực tế):**\n`{response.url}`"
         return response_text
 
     except Exception as e:
-        return f"❌ Lỗi khi giả lập trình duyệt ảo: {str(e)}"
-    finally:
-        if driver:
-            driver.quit() # Luôn đóng trình duyệt ngầm để giải phóng RAM cho server
+        return f"❌ Lỗi khi quét liên kết bằng Engine giả lập: {str(e)}"
 
 # --- PHẦN 2: TELEGRAM BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Chào mừng! Hãy gửi link cho tôi, tôi sẽ dùng trình duyệt ẩn ngầm Selenium để bóc tách mọi link chuyển hướng Javascript.")
+    await update.message.reply_text("🤖 Chào mừng! Tôi sử dụng Engine giả lập để theo dõi hành trình chuyển hướng của các link bảo mật cao.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_url = update.message.text.strip()
-    await update.message.reply_text("🌐 Đang bật trình duyệt ảo Selenium và quét chuyển hướng ngầm, vui lòng đợi vài giây...")
+    await update.message.reply_text("🌐 Đang kích hoạt bộ giải mã và theo dõi chuỗi nhảy link ngầm, vui lòng đợi...")
     
-    # Chạy hàm Selenium trong luồng đồng bộ bình thường
-    response_text = trace_url_with_selenium(user_url)
+    # Chạy đồng bộ an toàn
+    response_text = trace_url_with_scraper(user_url)
     await update.message.reply_text(response_text, parse_mode="Markdown")
 
-# --- PHẦN 3: WEB SERVER FLASK MINI ĐỂ TREO PORT RENDER ---
+# --- PHẦN 3: WEB SERVER FLASK MINI GIỮ PORT RENDER ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def health_check():
-    return "Selenium Redirect Bot is alive!", 200
+    return "Engine Redirect Bot is alive!", 200
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
@@ -108,10 +86,9 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Khởi động Flask giữ kết nối Render
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Telegram đã khởi động hoàn toàn thành công...")
+    print("🤖 Bot Telegram đã khởi động thành công...")
     application.run_polling()
 
 if __name__ == "__main__":
