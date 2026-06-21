@@ -1,13 +1,18 @@
 import os
 import threading
-import asyncio
+import time
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from urllib.parse import urlparse
-from playwright.async_api import async_playwright
 
-# --- PHẦN 1: LOGIC TRACE URL BẰNG PLAYWRIGHT (GIẢ LẬP TRÌNH DUYỆT THẬT) ---
+# --- IMPORT SELENIUM TRÌNH DUYỆT ẢO DI ĐỘNG ---
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+
+# --- PHẦN 1: LOGIC KIỂM TRA CHUYỂN HƯỚNG CÓ CHẠY JAVASCRIPT ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -15,7 +20,7 @@ def is_valid_url(url):
     except:
         return False
 
-async def trace_url_with_browser(input_url):
+def trace_url_with_selenium(input_url):
     if not input_url.strip():
         return "⚠️ Vui lòng nhập một liên kết."
     
@@ -25,80 +30,74 @@ async def trace_url_with_browser(input_url):
     if not is_valid_url(input_url):
         return "❌ Liên kết không hợp lệ."
 
-    # Tạo một danh sách lưu lại chuỗi chuyển hướng
-    redirect_chain = []
-    
+    # Cấu hình Chrome chạy ẩn ngầm (Headless) không cần giao diện, tối ưu RAM cho Render
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+    driver = None
     try:
-        async with async_playwright() as p:
-            # Khởi chạy trình duyệt Chromium ngầm (headless)
-            browser = await p.chromium.launch(headless=True)
-            
-            # Giả lập thiết bị di động hoặc máy tính để né bớt bot detection
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
-            
-            # Lắng nghe sự kiện mỗi khi URL thay đổi (bao gồm cả chuyển hướng bằng Javascript)
-            page.on("framenavigated", lambda frame: redirect_chain.append(frame.url) if frame == page.main_frame else None)
-            
-            # Truy cập trang web và đợi tối đa 15 giây cho trang tải xong (networkidle)
-            await page.goto(input_url, wait_until="load", timeout=15000)
-            
-            # Đợi thêm 3 giây phòng trường hợp script đếm ngược trễ
-            await asyncio.sleep(3)
-            
-            final_url = page.url
-            await browser.close()
-            
-        # Lọc bỏ các URL trùng lặp liên tiếp trong danh sách trace
-        clean_chain = []
-        for url in redirect_chain:
-            if not clean_chain or clean_chain[-1] != url:
-                clean_chain.append(url)
-                
-        response_text = f"🔍 **Hành trình chuyển hướng thực tế (Có chạy Javascript):**\n\n"
-        response_text += f"🏁 **URL gốc:** {input_url}\n"
+        # Tự động tải và cấu hình phiên bản Chrome di động phù hợp với Render
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        if len(clean_chain) <= 1 and clean_chain[0] == final_url:
-            response_text += "\n✨ Trang web đứng yên, không có phản hồi chuyển hướng nào.\n"
-            response_text += f"📍 **Điểm dừng:** {final_url}"
-            return response_text
+        # Thiết lập thời gian chờ tải trang tối đa 15 giây
+        driver.set_page_load_timeout(15)
+        
+        # "Ấn enter" mở link
+        driver.get(input_url)
+        
+        # Đợi 4 giây để Javascript đếm ngược ngầm hoặc chuyển hướng hoạt động xong
+        time.sleep(4)
+        
+        # Lấy ra URL cuối cùng sau khi đã chạy xong Javascript
+        final_url = driver.current_url
+        
+        response_text = f"🔍 **Hành trình kiểm tra bằng Trình duyệt ảo:**\n\n"
+        response_text += f"🏁 **URL gốc của bạn:** {input_url}\n\n"
+        
+        if input_url.strip("/") == final_url.strip("/"):
+            response_text += "✨ Trang web đứng yên, không phát hiện lệnh nhảy URL (Redirect) nào khác bằng Javascript.\n"
+            response_text += f"📍 **Điểm dừng hiện tại:** {final_url}"
+        else:
+            response_text += "🚀 **Phát hiện chuyển hướng ngầm bằng Javascript!**\n"
+            response_text += f"🎯 **URL đích thực tế (Điểm đến cuối cùng):**\n`{final_url}`"
             
-        response_text += "\n🚀 **Các bước nhảy URL:**\n"
-        for index, url in enumerate(clean_chain, 1):
-            if url == final_url:
-                response_text += f"{index}. {url} *(Điểm dừng cuối)*\n"
-            else:
-                response_text += f"{index}. {url}\n"
-                
         return response_text
 
     except Exception as e:
-        return f"❌ Lỗi khi mở trình duyệt ảo: {str(e)}"
+        return f"❌ Lỗi khi giả lập trình duyệt ảo: {str(e)}"
+    finally:
+        if driver:
+            driver.quit() # Luôn đóng trình duyệt ngầm để giải phóng RAM cho server
 
 # --- PHẦN 2: TELEGRAM BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Chào mừng! Tôi sử dụng trình duyệt ảo để bắt mọi loại link chuyển hướng bằng Javascript.")
+    await update.message.reply_text("🤖 Chào mừng! Hãy gửi link cho tôi, tôi sẽ dùng trình duyệt ẩn ngầm Selenium để bóc tách mọi link chuyển hướng Javascript.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_url = update.message.text.strip()
-    await update.message.reply_text("🌐 Đang khởi động trình duyệt ảo và theo dõi chuyển hướng ngầm, vui lòng đợi từ 5-10 giây...")
-    # Vì hàm trace chạy async nên ta gọi await trực tiếp
-    response_text = await trace_url_with_browser(user_url)
+    await update.message.reply_text("🌐 Đang bật trình duyệt ảo Selenium và quét chuyển hướng ngầm, vui lòng đợi vài giây...")
+    
+    # Chạy hàm Selenium trong luồng đồng bộ bình thường
+    response_text = trace_url_with_selenium(user_url)
     await update.message.reply_text(response_text, parse_mode="Markdown")
 
-# --- PHẦN 3: WEB SERVER FLASK MINI ---
+# --- PHẦN 3: WEB SERVER FLASK MINI ĐỂ TREO PORT RENDER ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def health_check():
-    return "Browser Redirect Bot is alive!", 200
+    return "Selenium Redirect Bot is alive!", 200
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
 
+# --- PHẦN 4: KHỞI CHẠY HỆ THỐNG ---
 def main():
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
@@ -109,9 +108,10 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # Khởi động Flask giữ kết nối Render
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Telegram đã khởi động thành công...")
+    print("🤖 Bot Telegram đã khởi động hoàn toàn thành công...")
     application.run_polling()
 
 if __name__ == "__main__":
