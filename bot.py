@@ -1,12 +1,13 @@
 import os
-import requests
 import threading
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from urllib.parse import urlparse
+from playwright.async_api import async_playwright
 
-# --- PHẦN 1: LOGIC KIỂM TRA CHUYỂN HƯỚNG URL (ĐÚNG Ý BẠN) ---
+# --- PHẦN 1: LOGIC TRACE URL BẰNG PLAYWRIGHT (GIẢ LẬP TRÌNH DUYỆT THẬT) ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -14,62 +15,85 @@ def is_valid_url(url):
     except:
         return False
 
-def trace_url_redirects(input_url):
+async def trace_url_with_browser(input_url):
     if not input_url.strip():
         return "⚠️ Vui lòng nhập một liên kết."
     
-    # Chuẩn hóa link nếu người dùng nhập thiếu http/https
     if not input_url.startswith(("http://", "https://")):
         input_url = "https://" + input_url
 
     if not is_valid_url(input_url):
         return "❌ Liên kết không hợp lệ."
 
+    # Tạo một danh sách lưu lại chuỗi chuyển hướng
+    redirect_chain = []
+    
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        }
-        
-        # requests.get mặc định sẽ tự động "ấn enter" và đi theo các bước chuyển hướng (allow_redirects=True)
-        response = requests.get(input_url, headers=headers, timeout=15, allow_redirects=True)
-        
-        # Lấy ra danh sách các URL trung gian mà trang web đã đi qua
-        redirect_chain = response.history
-        
-        response_text = f"🔍 **Hành trình chuyển hướng của URL:**\n\n"
+        async with async_playwright() as p:
+            # Khởi chạy trình duyệt Chromium ngầm (headless)
+            browser = await p.chromium.launch(headless=True)
+            
+            # Giả lập thiết bị di động hoặc máy tính để né bớt bot detection
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            
+            # Lắng nghe sự kiện mỗi khi URL thay đổi (bao gồm cả chuyển hướng bằng Javascript)
+            page.on("framenavigated", lambda frame: redirect_chain.append(frame.url) if frame == page.main_frame else None)
+            
+            # Truy cập trang web và đợi tối đa 15 giây cho trang tải xong (networkidle)
+            await page.goto(input_url, wait_until="load", timeout=15000)
+            
+            # Đợi thêm 3 giây phòng trường hợp script đếm ngược trễ
+            await asyncio.sleep(3)
+            
+            final_url = page.url
+            await browser.close()
+            
+        # Lọc bỏ các URL trùng lặp liên tiếp trong danh sách trace
+        clean_chain = []
+        for url in redirect_chain:
+            if not clean_chain or clean_chain[-1] != url:
+                clean_chain.append(url)
+                
+        response_text = f"🔍 **Hành trình chuyển hướng thực tế (Có chạy Javascript):**\n\n"
         response_text += f"🏁 **URL gốc:** {input_url}\n"
         
-        if not redirect_chain:
-            response_text += "\n✨ Trang web này đứng yên tại chỗ, không có phản hồi chuyển hướng (Redirect) nào khác.\n"
-            response_text += f"📍 **Điểm dừng hiện tại:** {response.url}"
+        if len(clean_chain) <= 1 and clean_chain[0] == final_url:
+            response_text += "\n✨ Trang web đứng yên, không có phản hồi chuyển hướng nào.\n"
+            response_text += f"📍 **Điểm dừng:** {final_url}"
             return response_text
             
-        response_text += "\n🚀 **Các bước chuyển hướng trung gian:**\n"
-        for index, step in enumerate(redirect_chain, 1):
-            response_text += f"{index}. {step.url} *(Mã trạng thái: {step.status_code})*\n"
-            
-        response_text += f"\n🎯 **URL cuối cùng (Điểm đến thực tế):**\n{response.url}"
+        response_text += "\n🚀 **Các bước nhảy URL:**\n"
+        for index, url in enumerate(clean_chain, 1):
+            if url == final_url:
+                response_text += f"{index}. {url} *(Điểm dừng cuối)*\n"
+            else:
+                response_text += f"{index}. {url}\n"
+                
         return response_text
 
     except Exception as e:
-        return f"❌ Không thể truy cập hoặc kiểm tra liên kết này. Lỗi: {str(e)}"
+        return f"❌ Lỗi khi mở trình duyệt ảo: {str(e)}"
 
 # --- PHẦN 2: TELEGRAM BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Chào mừng! Hãy gửi cho tôi 1 liên kết, tôi sẽ kiểm tra xem nó tự động chuyển hướng (Redirect) đến những URL nào nhé.")
+    await update.message.reply_text("🤖 Chào mừng! Tôi sử dụng trình duyệt ảo để bắt mọi loại link chuyển hướng bằng Javascript.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_url = update.message.text.strip()
-    await update.message.reply_text("🔍 Đang giả lập trình duyệt và theo dõi các bước chuyển hướng, vui lòng đợi...")
-    response_text = trace_url_redirects(user_url)
+    await update.message.reply_text("🌐 Đang khởi động trình duyệt ảo và theo dõi chuyển hướng ngầm, vui lòng đợi từ 5-10 giây...")
+    # Vì hàm trace chạy async nên ta gọi await trực tiếp
+    response_text = await trace_url_with_browser(user_url)
     await update.message.reply_text(response_text, parse_mode="Markdown")
 
-# --- PHẦN 3: WEB SERVER FLASK MINI ĐỂ TREO RENDER ---
+# --- PHẦN 3: WEB SERVER FLASK MINI ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def health_check():
-    return "Redirect Bot is alive!", 200
+    return "Browser Redirect Bot is alive!", 200
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
