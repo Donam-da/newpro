@@ -1,13 +1,16 @@
 import os
 import threading
-import asyncio
+import time
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from urllib.parse import urlparse
 
-# --- IMPORT ASYNC HTML SESSION ---
-from requests_html import AsyncHTMLSession
+# --- SỬ DỤNG BẢN SYNC CỦA PLAYWRIGHT (MÔ MÔI TRƯỜNG ĐỘC LẬP) ---
+from playwright.sync_api import sync_playwright
+
+# 🔥 CẤU HÌNH CHO 10 NGƯỜI DÙNG: Cho phép tối đa 10 trình duyệt Chromium chạy song song
+browser_semaphore = threading.Semaphore(10)
 
 def is_valid_url(url):
     try:
@@ -16,8 +19,7 @@ def is_valid_url(url):
     except:
         return False
 
-# Chuyển hàm này thành async để đồng bộ với Telegram loop
-async def trace_url_with_browser_engine(input_url):
+def trace_url_with_sync_browser(input_url):
     if not input_url.strip():
         return "⚠️ Vui lòng nhập một liên kết."
     
@@ -27,56 +29,81 @@ async def trace_url_with_browser_engine(input_url):
     if not is_valid_url(input_url):
         return "❌ Liên kết không hợp lệ."
 
-    try:
-        # Sử dụng AsyncHTMLSession đúng như hệ thống yêu cầu
-        session = AsyncHTMLSession()
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        }
-        
-        # Dùng await để lấy dữ liệu bất đồng bộ
-        response = await session.get(input_url, headers=headers, timeout=20)
-        server_url = response.url
-        
-        print("Log: Đang kích hoạt nhân Chromium chạy Javascript ẩn...")
-        # Gọi await cho hàm render Javascript ngầm
-        await response.html.render(timeout=20, wait=5, sleep=3)
-        
-        final_url = response.url
-        await session.close()
-
-        response_text = f"🔍 **Kết quả phân tích từ nhân Trình duyệt ảo:**\n\n"
-        response_text += f"🏁 **URL gốc:** {input_url}\n"
-        
-        if server_url != input_url:
-            response_text += f"🚀 **Bước nhảy 1 (Server):** {server_url}\n"
+    redirect_chain = []
+    
+    # Tự động xếp hàng vào một trong 10 slot trống của hệ thống
+    with browser_semaphore:
+        try:
+            with sync_playwright() as p:
+                print("Log: Khởi chạy Chromium ngầm di động...")
+                browser = p.chromium.launch(headless=True)
+                
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                
+                # Lắng nghe liên tục mọi sự kiện nhảy URL (Cả Server lẫn Javascript Client)
+                page.on("framenavigated", lambda frame: redirect_chain.append(frame.url) if frame == page.main_frame else None)
+                
+                # 🔥 ĐÃ NÂNG TIMEOUT LÊN 60 GIÂY (60000ms) để đợi các trang web script nặng
+                try:
+                    page.goto(input_url, wait_until="load", timeout=60000)
+                except Exception as load_err:
+                    print(f"Log: Hết thời gian chờ 1 phút hoặc trang ngừng nạp: {str(load_err)}")
+                    
+                # Nghỉ thêm 3 giây tĩnh lặng cuối cùng để script kích hoạt lệnh nhảy trang
+                time.sleep(3)
+                
+                final_url = page.url
+                browser.close()
+                
+            # Loại bỏ các URL trùng lặp liên tiếp trong lịch sử nhảy link
+            clean_chain = []
+            for url in redirect_chain:
+                if not clean_chain or clean_chain[-1] != url:
+                    clean_chain.append(url)
+                    
+            response_text = f"🔍 **Hành trình kiểm tra bằng Trình duyệt ảo (Nhân Chromium):**\n\n"
+            response_text += f"🏁 **URL gốc:** {input_url}\n"
             
-        if final_url.strip("/") == server_url.strip("/"):
-            response_text += "\n⚠️ Trình duyệt ảo đã đợi 8 giây nhưng trang web vẫn đứng yên. Rất có thể trang này bắt buộc phải tương tác bằng tay (Click chuột vào nút 'Lấy Link') thì mới sinh ra link đích."
-        else:
-            response_text += f"\n🎯 **URL đích thực tế (Sau khi chạy Script ẩn):**\n`{final_url}`"
-            
-        return response_text
+            if len(clean_chain) <= 1 and clean_chain[0] == final_url:
+                response_text += "\n✨ Trang web này đứng yên tại chỗ, không tự động nhảy đi đâu.\n"
+                response_text += f"📍 **Điểm dừng hiện tại:** {final_url}"
+                return response_text
+                
+            response_text += "\n🚀 **Các bước nhảy URL thực tế phát hiện được:**\n"
+            for index, url in enumerate(clean_chain, 1):
+                if url == final_url:
+                    response_text += f"{index}. {url} *(Điểm dừng cuối)*\n"
+                else:
+                    response_text += f"{index}. {url}\n"
+                    
+            return response_text
 
-    except Exception as e:
-        return f"❌ Lỗi trong quá trình giả lập trình duyệt thực thi Script: {str(e)}"
+        except Exception as e:
+            return f"❌ Lỗi giả lập trình duyệt: {str(e)}"
 
-# --- PHẦN HẠ TẦNG BOT VÀ FLASK ---
+# --- HẠ TẦNG BOT VÀ WEB SERVER FLASK ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Hệ thống kiểm tra link chạy nhân Chromium đã sẵn sàng. Hãy gửi link cho tôi!")
+    await update.message.reply_text(
+        "🤖 **Hệ thống Quét Link Nhân Chromium Đa Luồng**\n\n"
+        "Chào mừng bạn và nhóm bạn của Nam! Hãy gửi link vào đây, bot sẽ bóc tách toàn bộ chuỗi nhảy URL ẩn ngầm bằng Javascript.",
+        parse_mode="Markdown"
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_url = update.message.text.strip()
-    await update.message.reply_text("🌐 Đang nạp link vào trình duyệt ảo, thực thi Javascript và đợi chuyển hướng ngầm (Mất khoảng 8-10 giây), vui lòng đợi...")
+    await update.message.reply_text("🌐 Đang nạp link vào hệ thống đa luồng, thực thi mã Script (Vui lòng đợi trong giây lát)...")
     
-    # Gọi await trực tiếp vì trace_url giờ đã là hàm async chuẩn
-    response_text = await trace_url_with_browser_engine(user_url)
+    # Gọi hàm xử lý đồng bộ độc lập hoàn toàn với event loop của Telegram
+    response_text = trace_url_with_sync_browser(user_url)
     await update.message.reply_text(response_text, parse_mode="Markdown")
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def health_check(): return "Browser Engine Bot is alive!", 200
+def health_check(): 
+    return "Multi-user Playwright Bot is alive!", 200
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
@@ -84,11 +111,22 @@ def run_flask():
 
 def main():
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not TOKEN: return
+    if not TOKEN: 
+        print("⚠️ Thiếu biến môi trường TELEGRAM_BOT_TOKEN.")
+        return
+    
+    # Đảm bảo driver của Chromium luôn được cài đặt đầy đủ khi khởi động máy ảo
+    print("📦 Chuẩn bị cài đặt cấu hình driver Chromium...")
+    os.system("playwright install chromium")
+    print("✅ Cài đặt driver thành công!")
+    
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Chạy Flask ở luồng riêng biệt để treo port mạng ổn định trên Render
     threading.Thread(target=run_flask, daemon=True).start()
+    print("🤖 Bot Telegram khởi động thành công...")
     application.run_polling()
 
 if __name__ == "__main__":
