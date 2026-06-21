@@ -1,15 +1,14 @@
 import os
 import threading
 import time
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from urllib.parse import urlparse
-
-# --- SỬ DỤNG BẢN SYNC CỦA PLAYWRIGHT (MÔ MÔI TRƯỜNG ĐỘC LẬP) ---
 from playwright.sync_api import sync_playwright
 
-# 🔥 CẤU HÌNH CHO 10 NGƯỜI DÙNG: Cho phép tối đa 10 trình duyệt Chromium chạy song song
+# Giới hạn tối đa 10 trình duyệt Chromium chạy song song
 browser_semaphore = threading.Semaphore(10)
 
 def is_valid_url(url):
@@ -19,7 +18,8 @@ def is_valid_url(url):
     except:
         return False
 
-def trace_url_with_sync_browser(input_url):
+# Hàm đồng bộ thuần túy xử lý Playwright
+def trace_url_worker(input_url):
     if not input_url.strip():
         return "⚠️ Vui lòng nhập một liên kết."
     
@@ -31,7 +31,6 @@ def trace_url_with_sync_browser(input_url):
 
     redirect_chain = []
     
-    # Tự động xếp hàng vào một trong 10 slot trống của hệ thống
     with browser_semaphore:
         try:
             with sync_playwright() as p:
@@ -43,22 +42,18 @@ def trace_url_with_sync_browser(input_url):
                 )
                 page = context.new_page()
                 
-                # Lắng nghe liên tục mọi sự kiện nhảy URL (Cả Server lẫn Javascript Client)
+                # Theo dõi hành trình URL
                 page.on("framenavigated", lambda frame: redirect_chain.append(frame.url) if frame == page.main_frame else None)
                 
-                # 🔥 ĐÃ NÂNG TIMEOUT LÊN 60 GIÂY (60000ms) để đợi các trang web script nặng
                 try:
                     page.goto(input_url, wait_until="load", timeout=60000)
                 except Exception as load_err:
-                    print(f"Log: Hết thời gian chờ 1 phút hoặc trang ngừng nạp: {str(load_err)}")
+                    print(f"Log: Hết thời gian chờ hoặc trang ngừng nạp: {str(load_err)}")
                     
-                # Nghỉ thêm 3 giây tĩnh lặng cuối cùng để script kích hoạt lệnh nhảy trang
                 time.sleep(3)
-                
                 final_url = page.url
                 browser.close()
                 
-            # Loại bỏ các URL trùng lặp liên tiếp trong lịch sử nhảy link
             clean_chain = []
             for url in redirect_chain:
                 if not clean_chain or clean_chain[-1] != url:
@@ -87,23 +82,24 @@ def trace_url_with_sync_browser(input_url):
 # --- HẠ TẦNG BOT VÀ WEB SERVER FLASK ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 **Hệ thống Quét Link Nhân Chromium Đa Luồng**\n\n"
-        "Chào mừng bạn và nhóm bạn của Nam! Hãy gửi link vào đây, bot sẽ bóc tách toàn bộ chuỗi nhảy URL ẩn ngầm bằng Javascript.",
+        "🤖 **Bot Kiểm Tra Chuyển Hướng Link**\n\n"
+        "Hãy gửi link vào đây, bot sẽ bóc tách chuỗi nhảy URL bằng nhân Chromium cô lập.",
         parse_mode="Markdown"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_url = update.message.text.strip()
-    await update.message.reply_text("🌐 Đang nạp link vào hệ thống đa luồng, thực thi mã Script (Vui lòng đợi trong giây lát)...")
+    await update.message.reply_text("🌐 Đang nạp link vào luồng Chromium độc lập, xử lý Script ngầm...")
     
-    # Gọi hàm xử lý đồng bộ độc lập hoàn toàn với event loop của Telegram
-    response_text = trace_url_with_sync_browser(user_url)
+    # 🔥 ĐÂY LÀ CHÌA KHÓA: Ép hàm đồng bộ chạy trên một Thread hoàn toàn tách biệt với asyncio loop
+    response_text = await asyncio.to_thread(trace_url_worker, user_url)
+    
     await update.message.reply_text(response_text, parse_mode="Markdown")
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def health_check(): 
-    return "Multi-user Playwright Bot is alive!", 200
+    return "Playwright Threaded Bot is alive!", 200
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
@@ -115,18 +111,15 @@ def main():
         print("⚠️ Thiếu biến môi trường TELEGRAM_BOT_TOKEN.")
         return
     
-    # Đảm bảo driver của Chromium luôn được cài đặt đầy đủ khi khởi động máy ảo
-    print("📦 Chuẩn bị cài đặt cấu hình driver Chromium...")
-    os.system("playwright install chromium")
-    print("✅ Cài đặt driver thành công!")
+    # Khởi động Flask mở Port trước
+    threading.Thread(target=run_flask, daemon=True).start()
+    print("✅ Flask Web Server đã mở Port thành công.")
     
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Chạy Flask ở luồng riêng biệt để treo port mạng ổn định trên Render
-    threading.Thread(target=run_flask, daemon=True).start()
-    print("🤖 Bot Telegram khởi động thành công...")
+    print("🤖 Bot Telegram bắt đầu lắng nghe...")
     application.run_polling()
 
 if __name__ == "__main__":
