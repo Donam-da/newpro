@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- PHẦN 1: LOGIC CRAWLER ---
+# --- PHẦN 1: LOGIC CRAWLER (ĐÃ MỞ RỘNG ĐỂ KHÔNG BỊ PROXY CHẶN) ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -24,12 +24,16 @@ def crawl_links(input_url):
     if not is_valid_url(input_url):
         return "❌ Liên kết không hợp lệ."
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        # Giả lập trình duyệt để tránh bị các web chặn cào dữ liệu
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         response = requests.get(input_url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         domain_name = urlparse(input_url).netloc
         external_links = set()
+        
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             absolute_url = urljoin(input_url, href)
@@ -37,6 +41,7 @@ def crawl_links(input_url):
             if is_valid_url(clean_url):
                 if domain_name not in urlparse(clean_url).netloc:
                     external_links.add(clean_url)
+                    
         result_list = sorted(list(external_links))
         if not result_list:
             return "🔍 Không tìm thấy liên kết ngoại khu nào."
@@ -47,7 +52,7 @@ def crawl_links(input_url):
             response_text += f"\n... và {len(result_list) - 15} liên kết khác."
         return response_text
     except Exception as e:
-        return f"❌ Lỗi: {str(e)}"
+        return f"❌ Lỗi khi cào link: {str(e)}"
 
 # --- PHẦN 2: TELEGRAM BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -59,7 +64,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_text = crawl_links(user_url)
     await update.message.reply_text(response_text)
 
-# --- PHẦN 3: WEB SERVER MINI ĐỂ RENDER NHẬN PORT VÀ ĐÁNH THỨC ---
+# --- PHẦN 3: WEB SERVER MINI ĐỂ RENDER NHẬN DIỆN PORT KHÔNG BỊ LỖI ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -67,13 +72,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is alive!")
     def log_message(self, format, *args):
-        return
+        return  # Tắt log để màn hình Render sạch hơn
 
 def run_health_server():
-    # Render sẽ nạp cổng tự động qua biến môi trường PORT
+    # Render cấp cổng tự động qua biến PORT, nếu chạy cục bộ thì mặc định là 8080
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"🌍 Web Server phục vụ đánh thức đang chạy tại cổng {port}...")
+    print(f"🌍 Web Server phản hồi Render đang chạy tại port {port}...")
     server.serve_forever()
 
 def main():
@@ -86,7 +91,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Kích hoạt mở cổng Web Server phục vụ Render quét Port
+    # Kích hoạt luồng chạy Web Server song song để phục vụ cơ chế quét Port của Render
     threading.Thread(target=run_health_server, daemon=True).start()
     
     print("🤖 Bot Telegram đã khởi động thành công...")
