@@ -1,11 +1,14 @@
 import os
 import asyncio
 import requests
+import threading
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# --- PHẦN 1: LOGIC CRAWLER ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -46,6 +49,7 @@ def crawl_links(input_url):
     except Exception as e:
         return f"❌ Lỗi: {str(e)}"
 
+# --- PHẦN 2: TELEGRAM BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Chào mừng! Hãy gửi cho tôi 1 liên kết (URL), tôi sẽ quét các liên kết ngoại khu giúp bạn.")
 
@@ -55,14 +59,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_text = crawl_links(user_url)
     await update.message.reply_text(response_text)
 
+# --- PHẦN 3: WEB SERVER MINI ĐỂ RENDER NHẬN PORT VÀ ĐÁNH THỨC ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+    def log_message(self, format, *args):
+        return
+
+def run_health_server():
+    # Render sẽ nạp cổng tự động qua biến môi trường PORT
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"🌍 Web Server phục vụ đánh thức đang chạy tại cổng {port}...")
+    server.serve_forever()
+
 def main():
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
         print("⚠️ Thiếu biến môi trường TELEGRAM_BOT_TOKEN.")
         return
+        
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Kích hoạt mở cổng Web Server phục vụ Render quét Port
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
     print("🤖 Bot Telegram đã khởi động thành công...")
     application.run_polling()
 
